@@ -95,15 +95,15 @@ contract PixieToken is ERC20, ReentrancyGuard {
         require(msg.sender == factory, "Unauthorized");
         require(_initialized, "Not initialized");
         require(tokenAmount > 0, "Amount too small");
-        require(balanceOf(seller) >= tokenAmount, "Insufficient balance");
         
         // Calculate ETH to return based on bonding curve
         uint256 ethAmount = bondingCurve.getTokenSellQuote(totalSupply(), tokenAmount);
         require(ethAmount >= MIN_ORDER_SIZE, "ETH amount too small");
         require(address(this).balance >= ethAmount, "Insufficient ETH reserves");
         
-        // Burn the tokens
-        _burn(seller, tokenAmount);
+        // Burn the tokens directly from the contract's balance
+        // This assumes the tokens have already been transferred to this contract
+        _burn(address(this), tokenAmount);
         
         // Send ETH to seller (no fees on selling to ensure liquidity)
         (bool success, ) = seller.call{value: ethAmount}("");
