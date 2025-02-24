@@ -1,23 +1,28 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import "./interfaces/IUniswapInterfaces.sol";
+import "./interfaces/IPixieHook.sol";
 import "./LazyTokenFactory.sol";
 import "./PixieToken.sol";
 import "forge-std/console.sol";
 
 /**
  * @title PixieHook
- * @dev Hook for lazy deployment of Pixie tokens during first swap
+ * @notice Uniswap v4 hook for Pixie tokens with bonding curve support
  */
-contract PixieHook is IHooks {
+contract PixieHook is IHooks, IPixieHook {
     // Constants
     uint256 public constant MIN_LIQUIDITY_AMOUNT = 1000 * 10**18; // 1000 tokens for initial liquidity
     
-    // The token factory
+    // Factory address
     LazyTokenFactory public immutable factory;
-    // The pool manager
-    IPoolManager public immutable poolManager;
+    
+    // Pool manager address
+    address public immutable poolManager;
+    
+    // Content ID for lazy deployment
+    bytes32 public contentId;
     
     // Mock selector constants for interface compliance
     bytes4 private constant BEFORE_INITIALIZE_SELECTOR = bytes4(keccak256("beforeInitialize(address,PoolKey,uint160)"));
@@ -32,97 +37,133 @@ contract PixieHook is IHooks {
     bytes4 private constant AFTER_DONATE_SELECTOR = bytes4(keccak256("afterDonate(address,PoolKey,uint256,uint256,bytes)"));
     
     /**
-     * @dev Constructor
-     * @param _factory Factory contract address
+     * @notice Constructor
+     * @param _factory Factory address
      * @param _poolManager Pool manager address
      */
     constructor(address _factory, address _poolManager) {
         factory = LazyTokenFactory(_factory);
-        poolManager = IPoolManager(_poolManager);
+        poolManager = _poolManager;
     }
     
     /**
-     * @dev Hook called before swap to check and deploy token if needed
+     * @notice Handle before swap
+     * @param key Pool key
+     * @param params Swap parameters
+     * @param data Hook data
      */
     function beforeSwap(
         address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
-        bytes calldata hookData
-    ) external override payable returns (bytes4, BeforeSwapDelta memory) {
-        // Debug logging to identify the sender
-        console.log("PixieHook beforeSwap - sender:", sender);
-        console.log("PixieHook beforeSwap - msg.sender:", msg.sender);
-        console.log("PixieHook beforeSwap - ETH value:", msg.value);
+        bytes calldata data
+    ) external payable override returns (bytes4, BeforeSwapDelta memory) {
+        require(msg.sender == poolManager, "PixieHook: Only pool manager");
         
-        // For simplicity, we assume currency1 is always the token we might need to deploy
-        // In a production setting, you would check both currencies and determine which one
-        // might need deployment based on the swap direction
+        // Get operation type and recipient from data
+        bytes1 opType = bytes1(data[0]);
+        address recipient = address(bytes20(data[1:21]));
         
-        // Check if we have a lazy token to deploy
-        bytes32 contentId = factory.getContentId(key.currency1);
-        if (contentId != bytes32(0)) {
-            // Extract ETH amount from params (for testing purposes)
-            // In a real implementation, you'd extract from the swap data appropriately
-            uint256 ethAmount = uint256(params.amountSpecified > 0 ? params.amountSpecified : -params.amountSpecified);
+        console.log("PixieHook: Before swap");
+        console.log("  Operation type:", uint8(opType));
+        console.log("  Recipient:", recipient);
+        console.log("  Value:", msg.value);
+        
+        // Get token address from currency
+        address tokenAddress = Currency.unwrap(key.currency1);
+        
+        // Determine operation type (0x00 = buy, 0x01 = sell)
+        if (opType == 0x00) {
+            // Buy operation - requires ETH
+            require(msg.value > 0, "PixieHook: Buy requires ETH");
+            require(params.zeroForOne, "PixieHook: Buy must be zeroForOne");
             
-            // For testing purposes, use a hardcoded amount if none provided
-            if (ethAmount == 0) {
-                ethAmount = 0.1 ether;
+            // Find content ID for the token
+            bytes32 tokenContentId;
+            // Try to get contentId from the currency mapping
+            tokenContentId = factory.getContentId(key.currency1);
+            
+            // If not found, use the contentId from storage (for testing)
+            if (bytes32(0) == tokenContentId) {
+                tokenContentId = contentId;
             }
             
-            console.log("ETH amount for purchase:", ethAmount);
+            // Deploy token if needed and mint tokens to recipient
+            factory.deployAndMint{value: msg.value}(tokenContentId, recipient);
             
-            // Get actual buyer
-            address buyer = sender;
+        } else if (opType == 0x01) {
+            // Sell operation
+            require(!params.zeroForOne, "PixieHook: Sell must be oneForZero");
+            require(params.amountSpecified > 0, "PixieHook: Sell amount must be positive");
             
-            // If needed for testing, can use a fixed buyer address
-            if (hookData.length > 0 && hookData.length == 32) {
-                // Try to extract buyer from hookData (simple approach)
-                buyer = address(bytes20(hookData[12:32]));
-                console.log("Using buyer from hookData:", buyer);
+            // Find content ID for the token
+            bytes32 tokenContentId = factory.getContentId(key.currency0);
+            
+            // If not found, use the contentId from storage (for testing)
+            if (bytes32(0) == tokenContentId) {
+                tokenContentId = contentId;
             }
             
-            // Deploy the token and mint tokens based on ETH value
-            // Note: In production, this would handle real ETH flow
-            // For testing we're just simulating the ETH transaction
-            try factory.deployAndMint{value: ethAmount}(
-                contentId,
-                buyer
-            ) returns (address tokenAddress) {
-                console.log("Token deployed/purchased at:", tokenAddress);
-            } catch Error(string memory reason) {
-                console.log("Purchase failed:", reason);
-            }
+            // Approve and sell tokens
+            // Note: Recipient must have approved the hook to spend their tokens
+            uint256 sellAmount = uint256(params.amountSpecified);
+            
+            // Get the recipient to approve the factory
+            bool success = IERC20(tokenAddress).transferFrom(
+                recipient,
+                address(this),
+                sellAmount
+            );
+            require(success, "PixieHook: Transfer from sender failed");
+            
+            // Approve factory to spend tokens
+            IERC20(tokenAddress).approve(address(factory), sellAmount);
+            
+            // Sell tokens and get ETH back
+            uint256 ethReceived = factory.sellTokens(tokenContentId, sellAmount);
+            
+            // Send ETH back to recipient
+            (success, ) = recipient.call{value: ethReceived}("");
+            require(success, "PixieHook: ETH transfer failed");
+        } else {
+            revert("PixieHook: Invalid operation type");
         }
         
-        // Return the actual interface selector
         return (IHooks.beforeSwap.selector, BeforeSwapDelta(0, 0, 0));
     }
     
     /**
-     * @dev Hook called after swap (required by interface)
+     * @notice Handle after swap
+     * @param key Pool key
+     * @param params Swap parameters
+     * @param delta Balance delta
+     * @param data Hook data
      */
     function afterSwap(
-        address,
-        PoolKey calldata,
-        IPoolManager.SwapParams calldata,
-        BalanceDelta calldata,
-        bytes calldata
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        BalanceDelta calldata delta,
+        bytes calldata data
     ) external override returns (bytes4, BalanceDelta memory) {
-        // No changes to the balance delta
+        require(msg.sender == poolManager, "PixieHook: Only pool manager");
+        
+        // Get operation type from data
+        bytes1 opType = bytes1(data[0]);
+        
+        // Log swap completion
+        console.log("PixieHook: After swap");
+        console.log("  Operation type:", uint8(opType));
+        
         return (IHooks.afterSwap.selector, BalanceDelta(0, 0));
     }
     
-    // The following functions are placeholders to satisfy the IHooks interface
-    // In a real implementation, you would implement all required hooks
-    
-    function beforeInitialize(address, PoolKey calldata, uint160) external pure returns (bytes4) {
-        return BEFORE_INITIALIZE_SELECTOR;
-    }
-    
-    function afterInitialize(address, PoolKey calldata, uint160, int24) external pure returns (bytes4) {
-        return AFTER_INITIALIZE_SELECTOR;
+    /**
+     * @notice Set content ID (for testing)
+     * @param _contentId Content ID
+     */
+    function setContentId(bytes32 _contentId) external override {
+        contentId = _contentId;
     }
     
     // Allow the contract to receive ETH

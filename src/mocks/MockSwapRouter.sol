@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import "../interfaces/IUniswapInterfaces.sol";
 import "forge-std/console.sol";
@@ -8,16 +8,16 @@ import "forge-std/console.sol";
  * @title MockSwapRouter
  * @dev A simplified swap router for testing
  */
-contract MockSwapRouter is IUnlockCallback {
-    IPoolManager public immutable poolManager;
-    address public lastActualSender;
+contract MockSwapRouter {
+    address payable public poolManager;
+    mapping(bytes32 => address) public originSenders;
     
     /**
      * @dev Constructor
      * @param _poolManager Pool manager address
      */
     constructor(address _poolManager) {
-        poolManager = IPoolManager(_poolManager);
+        poolManager = payable(_poolManager);
     }
     
     /**
@@ -31,21 +31,36 @@ contract MockSwapRouter is IUnlockCallback {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         bytes calldata hookData
-    ) external payable returns (BalanceDelta memory delta) {
-        // Store the original sender
-        lastActualSender = msg.sender;
-        console.log("SwapRouter swap - Original sender:", msg.sender);
-        console.log("SwapRouter swap - ETH value:", msg.value);
+    ) external payable returns (BalanceDelta memory) {
+        // Store the original sender for the callback
+        bytes32 poolId = keccak256(abi.encode(key));
+        originSenders[poolId] = msg.sender;
         
-        // Encode the parameters for the callback
-        bytes memory data = abi.encode(key, params, hookData, msg.sender, msg.value);
+        // Log swap details
+        console.log("MockSwapRouter: Swap initiated");
+        console.log("  Value sent:", msg.value);
+        console.log("  Amount specified:", uint256(params.amountSpecified));
+        console.log("  Zero for one:", params.zeroForOne);
         
-        // Call unlock on the pool manager
-        poolManager.unlock(data);
+        // Decode the hook data to determine operation type
+        bytes1 opType = bytes1(hookData[0]);
+        console.log("  Operation type:", uint8(opType));
         
-        // The actual swap happens in the unlockCallback
-        // For simplicity, we're returning a mock delta here
-        return BalanceDelta(0, 0);
+        // Forward value to pool manager for the swap
+        // This ensures that the hook has access to ETH for buying operations
+        (bool success, bytes memory data) = poolManager.call{value: msg.value}(
+            abi.encodeWithSelector(
+                IPoolManager.unlock.selector,
+                abi.encode(key, params, hookData, msg.sender)
+            )
+        );
+        
+        require(success, "Mock Swap Router: unlock failed");
+        
+        // For sell operations (opType = 0x01), the ETH is returned to the user
+        // This is handled automatically through the hook callback
+        
+        return abi.decode(data, (BalanceDelta));
     }
     
     /**
@@ -53,25 +68,25 @@ contract MockSwapRouter is IUnlockCallback {
      * @param data Encoded swap data
      * @return Result
      */
-    function unlockCallback(bytes calldata data) external override returns (bytes memory) {
-        require(msg.sender == address(poolManager), "Not pool manager");
+    function unlockCallback(
+        bytes calldata data,
+        bytes calldata
+    ) external returns (bytes memory) {
+        // Decode the swap parameters
+        (PoolKey memory key, IPoolManager.SwapParams memory params, bytes memory hookData, address sender) = 
+            abi.decode(data, (PoolKey, IPoolManager.SwapParams, bytes, address));
         
-        // Decode parameters
-        (
-            PoolKey memory key,
-            IPoolManager.SwapParams memory params,
-            bytes memory hookData,
-            address sender,
-            uint256 ethValue
-        ) = abi.decode(data, (PoolKey, IPoolManager.SwapParams, bytes, address, uint256));
+        bytes32 poolId = keccak256(abi.encode(key));
+        address originSender = originSenders[poolId];
         
-        console.log("SwapRouter unlockCallback - Decoded sender:", sender);
-        console.log("SwapRouter unlockCallback - ETH value:", ethValue);
+        // Call to the pool manager to execute the swap
+        IPoolManager pm = IPoolManager(poolManager);
+        BalanceDelta memory delta = pm.swap(key, params, hookData);
         
-        // Execute the swap as the original sender, passing along the ETH value
-        BalanceDelta memory delta = IPoolManager(msg.sender).swap{value: ethValue}(key, params, hookData);
+        // If we're selling tokens (not zeroForOne), ensure ETH is sent back to the user
+        // The hook will handle the actual ETH transfer after completing the sell
+        // No need to do anything here as the hook will handle it
         
-        // Return the result
         return abi.encode(delta);
     }
     

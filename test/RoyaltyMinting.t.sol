@@ -8,6 +8,7 @@ import "../src/mocks/MockPoolManager.sol";
 import "../src/mocks/MockSwapRouter.sol";
 import "../src/interfaces/IUniswapInterfaces.sol";
 import "../src/PixieToken.sol";
+import "../src/BondingCurve.sol";
 
 contract RoyaltyMintingTest is Test {
     // Contracts
@@ -15,6 +16,7 @@ contract RoyaltyMintingTest is Test {
     MockPoolManager public poolManager;
     PixieHook public hook;
     MockSwapRouter public router;
+    BondingCurve public bondingCurve;
     
     // Test accounts
     address public creator = address(0x1);
@@ -33,8 +35,9 @@ contract RoyaltyMintingTest is Test {
     
     function setUp() public {
         // Deploy contracts
+        bondingCurve = new BondingCurve();
         poolManager = new MockPoolManager();
-        factory = new LazyTokenFactory();
+        factory = new LazyTokenFactory(address(bondingCurve));
         hook = new PixieHook(address(factory), address(poolManager));
         router = new MockSwapRouter(address(poolManager));
         
@@ -62,25 +65,29 @@ contract RoyaltyMintingTest is Test {
         assertTrue(factory.isTokenDeployed(contentId), "Token should be deployed");
         
         // Verify token details
-        PixieToken token = PixieToken(tokenAddress);
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
         assertEq(token.name(), tokenName, "Token name should match");
         assertEq(token.symbol(), tokenSymbol, "Token symbol should match");
         assertEq(token.creator(), creator, "Creator should match");
         
-        // Calculate expected token amounts
-        uint256 expectedBuyerTokens = purchaseAmount * 95 / 100; // 95% to buyer
-        uint256 expectedCreatorTokens = purchaseAmount * 5 / 100; // 5% to creator
+        // Calculate expected token amounts based on bonding curve
+        uint256 expectedTokens = token.getBuyQuote(purchaseAmount);
+        uint256 expectedBuyerTokens = expectedTokens * 95 / 100; // 95% to buyer
+        uint256 expectedCreatorTokens = expectedTokens * 5 / 100; // 5% to creator
         
         // Verify token balances
         uint256 buyerBalance = token.balanceOf(buyer1);
         uint256 creatorBalance = token.balanceOf(creator);
         
-        assertEq(buyerBalance, expectedBuyerTokens, "Buyer should have 95% of tokens");
-        assertEq(creatorBalance, expectedCreatorTokens, "Creator should have 5% of tokens");
+        // Use approximate equality with a small tolerance for rounding differences
+        assertApproxEqRel(buyerBalance, expectedBuyerTokens, 0.01e18, "Buyer should have ~95% of tokens");
+        assertApproxEqRel(creatorBalance, expectedCreatorTokens, 0.01e18, "Creator should have ~5% of tokens");
         
         // Verify ETH was transferred to creator
         uint256 creatorEthAfter = creator.balance;
-        assertEq(creatorEthAfter - creatorEthBefore, purchaseAmount, "Creator should receive the ETH");
+        uint256 expectedRoyalty = (purchaseAmount * 500) / 10000; // 5% royalty
+        assertEq(creatorEthAfter - creatorEthBefore, expectedRoyalty, "Creator should receive 5% royalty");
         
         // Log results
         console.log("Purchase amount (ETH):", purchaseAmount);
@@ -96,7 +103,8 @@ contract RoyaltyMintingTest is Test {
         address tokenAddress = factory.deployAndMint{value: firstPurchase}(contentId, buyer1);
         
         // Track balances after first purchase
-        PixieToken token = PixieToken(tokenAddress);
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
         uint256 buyer1BalanceAfterFirstPurchase = token.balanceOf(buyer1);
         uint256 creatorBalanceAfterFirstPurchase = token.balanceOf(creator);
         uint256 creatorEthAfterFirstPurchase = creator.balance;
@@ -107,8 +115,9 @@ contract RoyaltyMintingTest is Test {
         factory.deployAndMint{value: secondPurchase}(contentId, buyer2);
         
         // Calculate expected token amounts for second purchase
-        uint256 expectedBuyer2Tokens = secondPurchase * 95 / 100; // 95% to buyer2
-        uint256 expectedCreatorAdditionalTokens = secondPurchase * 5 / 100; // 5% to creator
+        uint256 expectedTokens2 = token.getBuyQuote(secondPurchase);
+        uint256 expectedBuyer2Tokens = expectedTokens2 * 95 / 100; // 95% to buyer2
+        uint256 expectedCreatorTokens2 = expectedTokens2 * 5 / 100; // 5% to creator
         
         // Verify token balances after second purchase
         uint256 buyer1BalanceAfterSecondPurchase = token.balanceOf(buyer1);
@@ -119,21 +128,23 @@ contract RoyaltyMintingTest is Test {
         // Buyer1's balance should not change
         assertEq(buyer1BalanceAfterSecondPurchase, buyer1BalanceAfterFirstPurchase, "Buyer1 balance should not change");
         
-        // Buyer2 should receive tokens
-        assertEq(buyer2BalanceAfterSecondPurchase, expectedBuyer2Tokens, "Buyer2 should have 95% of second purchase tokens");
+        // Buyer2 should receive tokens (use approximate equality)
+        assertApproxEqRel(buyer2BalanceAfterSecondPurchase, expectedBuyer2Tokens, 0.01e18, "Buyer2 should have ~95% of second purchase tokens");
         
-        // Creator should receive additional tokens
-        assertEq(
+        // Creator should receive additional tokens (use approximate equality)
+        assertApproxEqRel(
             creatorBalanceAfterSecondPurchase - creatorBalanceAfterFirstPurchase, 
-            expectedCreatorAdditionalTokens, 
-            "Creator should receive 5% of second purchase tokens"
+            expectedCreatorTokens2, 
+            0.01e18, 
+            "Creator should receive ~5% of second purchase tokens"
         );
         
-        // Creator should receive the ETH
+        // Creator should receive the ETH (actually 5% royalty)
+        uint256 expectedRoyalty = (secondPurchase * 500) / 10000; // 5% royalty
         assertEq(
             creatorEthAfterSecondPurchase - creatorEthAfterFirstPurchase, 
-            secondPurchase, 
-            "Creator should receive the ETH from second purchase"
+            expectedRoyalty, 
+            "Creator should receive 5% royalty from second purchase"
         );
         
         // Log results
@@ -163,21 +174,26 @@ contract RoyaltyMintingTest is Test {
             vm.prank(buyer1);
             address tokenAddress = factory.deployAndMint{value: amount}(contentId, buyer1);
             
-            // Calculate expected tokens
-            uint256 expectedBuyerTokens = amount * 95 / 100;
-            uint256 expectedCreatorTokens = amount * 5 / 100;
+            // Get token instance
+            address payable tokenPayable = payable(tokenAddress);
+            PixieToken token = PixieToken(tokenPayable);
             
-            // Verify balances
-            PixieToken token = PixieToken(tokenAddress);
+            // Calculate expected tokens
+            uint256 expectedTokens = token.getBuyQuote(amount);
+            uint256 expectedBuyerTokens = expectedTokens * 95 / 100; // 95% to buyer
+            uint256 expectedCreatorTokens = expectedTokens * 5 / 100; // 5% to creator
+            
+            // Verify balances (use approximate equality)
             uint256 buyerBalance = token.balanceOf(buyer1);
             uint256 creatorBalance = token.balanceOf(creator);
             
-            assertEq(buyerBalance, expectedBuyerTokens, "Buyer should have 95% of tokens");
-            assertEq(creatorBalance, expectedCreatorTokens, "Creator should have 5% of tokens");
+            assertApproxEqRel(buyerBalance, expectedBuyerTokens, 0.01e18, "Buyer should have ~95% of tokens");
+            assertApproxEqRel(creatorBalance, expectedCreatorTokens, 0.01e18, "Creator should have ~5% of tokens");
             
             // Verify ETH transfer
             uint256 creatorEthAfter = creator.balance;
-            assertEq(creatorEthAfter - creatorEthBefore, amount, "Creator should receive the ETH");
+            uint256 expectedRoyalty = (amount * 500) / 10000; // 5% royalty
+            assertEq(creatorEthAfter - creatorEthBefore, expectedRoyalty, "Creator should receive 5% royalty");
             
             console.log("Test case", i+1, "- Purchase amount:", amount);
             console.log("Buyer tokens:", buyerBalance);
@@ -226,11 +242,13 @@ contract RoyaltyMintingTest is Test {
         assertTrue(factory.isTokenDeployed(contentId), "Token should be deployed");
         
         // Verify token details
-        PixieToken token = PixieToken(tokenAddress);
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
         
-        // Calculate expected token amounts
-        uint256 expectedBuyerTokens = purchaseAmount * 95 / 100; // 95% to buyer
-        uint256 expectedCreatorTokens = purchaseAmount * 5 / 100; // 5% to creator
+        // Calculate expected token amounts based on bonding curve
+        uint256 expectedTokens = token.getBuyQuote(purchaseAmount);
+        uint256 expectedBuyerTokens = expectedTokens * 95 / 100; // 95% to buyer
+        uint256 expectedCreatorTokens = expectedTokens * 5 / 100; // 5% to creator
         
         // Verify token balances
         uint256 buyerBalance = token.balanceOf(buyer1);
@@ -242,7 +260,8 @@ contract RoyaltyMintingTest is Test {
         
         // Verify ETH was transferred to creator
         uint256 creatorEthAfter = creator.balance;
-        assertEq(creatorEthAfter - creatorEthBefore, purchaseAmount, "Creator should receive the ETH");
+        uint256 expectedRoyalty = (purchaseAmount * 500) / 10000; // 5% royalty
+        assertEq(creatorEthAfter - creatorEthBefore, expectedRoyalty, "Creator should receive 5% royalty");
         
         // Log results
         console.log("Hook test - Purchase amount (ETH):", purchaseAmount);

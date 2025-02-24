@@ -1,18 +1,32 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./BondingCurve.sol";
 
 /**
  * @title PixieToken
- * @dev ERC20 Token for Pixie platform content
+ * @dev ERC20 Token for Pixie platform content with bonding curve mechanism
  */
-contract PixieToken is ERC20 {
+contract PixieToken is ERC20, ReentrancyGuard {
+    // Constants
+    uint256 public constant ROYALTY_BPS = 500; // 5% royalty to creator
+    uint256 public constant MAX_TOTAL_SUPPLY = 1_000_000_000e18; // 1B tokens
+    uint256 public constant FEE_DENOMINATOR = 10000;
+    uint256 public constant MIN_ORDER_SIZE = 0.0000001 ether;
+    
+    // Core token data
     address public factory;
     address public creator;
     string public contentURI;
     bool private _initialized;
+    BondingCurve public bondingCurve;
+    
+    // Events
+    event TokenBought(address indexed buyer, uint256 ethAmount, uint256 tokenAmount);
+    event TokenSold(address indexed seller, uint256 ethAmount, uint256 tokenAmount);
     
     /**
      * @dev Constructor that initializes token details
@@ -26,45 +40,110 @@ contract PixieToken is ERC20 {
     }
     
     /**
-     * @dev Initial mint function called only by factory
-     * @param buyer Address of first buyer
-     * @param buyerAmount Amount of tokens for buyer (95% of purchase)
-     * @param creatorAmount Amount of tokens for creator (5% royalty)
+     * @dev Initialize the token with bonding curve
+     * @param _bondingCurve The bonding curve contract address
      */
-    function initialMint(
-        address buyer, 
-        uint256 buyerAmount,
-        uint256 creatorAmount
-    ) external {
-        // Only factory can call this function
+    function initialize(address _bondingCurve) external {
         require(msg.sender == factory, "Unauthorized");
-        // Can only be initialized once
         require(!_initialized, "Already initialized");
+        require(_bondingCurve != address(0), "Zero address");
         
-        // Mint tokens to the buyer and creator
-        _mint(buyer, buyerAmount);
-        _mint(creator, creatorAmount);
-        
-        // Mark as initialized
+        bondingCurve = BondingCurve(_bondingCurve);
         _initialized = true;
     }
     
     /**
-     * @dev Mint function for subsequent purchases with royalty split
+     * @dev Buy tokens with ETH
      * @param buyer Address of the buyer
-     * @param amount Total amount of tokens to mint
      */
-    function mintWithRoyalty(address buyer, uint256 amount) external {
-        // Only factory can call this function
+    function buy(address buyer) external payable nonReentrant returns (uint256) {
         require(msg.sender == factory, "Unauthorized");
         require(_initialized, "Not initialized");
+        require(msg.value >= MIN_ORDER_SIZE, "Order too small");
+        require(buyer != address(0), "Zero address");
         
-        // Calculate royalty (5% to creator)
-        uint256 royaltyAmount = amount * 5 / 100;
-        uint256 buyerAmount = amount - royaltyAmount;
+        // Calculate the royalty and net investment amount
+        uint256 royaltyAmount = (msg.value * ROYALTY_BPS) / FEE_DENOMINATOR;
+        uint256 netInvestment = msg.value - royaltyAmount;
         
-        // Mint tokens to buyer and creator
-        _mint(buyer, buyerAmount);
-        _mint(creator, royaltyAmount);
+        // Calculate tokens to mint based on bonding curve
+        uint256 tokenAmount = bondingCurve.getEthBuyQuote(totalSupply(), netInvestment);
+        
+        // Split tokens between buyer and creator
+        uint256 creatorTokens = (tokenAmount * ROYALTY_BPS) / FEE_DENOMINATOR;
+        uint256 buyerTokens = tokenAmount - creatorTokens;
+        
+        // Mint the tokens
+        _mint(buyer, buyerTokens);
+        _mint(creator, creatorTokens);
+        
+        // Send royalty to creator
+        (bool success, ) = creator.call{value: royaltyAmount}("");
+        require(success, "ETH transfer failed");
+        
+        emit TokenBought(buyer, msg.value, tokenAmount);
+        
+        return tokenAmount;
     }
+    
+    /**
+     * @dev Sell tokens for ETH
+     * @param seller Address of the seller
+     * @param tokenAmount Amount of tokens to sell
+     */
+    function sell(address seller, uint256 tokenAmount) external nonReentrant returns (uint256) {
+        require(msg.sender == factory, "Unauthorized");
+        require(_initialized, "Not initialized");
+        require(tokenAmount > 0, "Amount too small");
+        require(balanceOf(seller) >= tokenAmount, "Insufficient balance");
+        
+        // Calculate ETH to return based on bonding curve
+        uint256 ethAmount = bondingCurve.getTokenSellQuote(totalSupply(), tokenAmount);
+        require(ethAmount >= MIN_ORDER_SIZE, "ETH amount too small");
+        require(address(this).balance >= ethAmount, "Insufficient ETH reserves");
+        
+        // Burn the tokens
+        _burn(seller, tokenAmount);
+        
+        // Send ETH to seller (no fees on selling to ensure liquidity)
+        (bool success, ) = seller.call{value: ethAmount}("");
+        require(success, "ETH transfer failed");
+        
+        emit TokenSold(seller, ethAmount, tokenAmount);
+        
+        return ethAmount;
+    }
+    
+    /**
+     * @dev Get the current token price based on supply
+     */
+    function getCurrentPrice() public view returns (uint256) {
+        return bondingCurve.getCurrentPrice(totalSupply());
+    }
+    
+    /**
+     * @dev Get quote for buying tokens with ETH
+     * @param ethAmount Amount of ETH to spend
+     */
+    function getBuyQuote(uint256 ethAmount) public view returns (uint256) {
+        // Calculate royalty
+        uint256 royaltyAmount = (ethAmount * ROYALTY_BPS) / FEE_DENOMINATOR;
+        uint256 netInvestment = ethAmount - royaltyAmount;
+        
+        // Get token amount from bonding curve
+        return bondingCurve.getEthBuyQuote(totalSupply(), netInvestment);
+    }
+    
+    /**
+     * @dev Get quote for selling tokens
+     * @param tokenAmount Amount of tokens to sell
+     */
+    function getSellQuote(uint256 tokenAmount) public view returns (uint256) {
+        return bondingCurve.getTokenSellQuote(totalSupply(), tokenAmount);
+    }
+    
+    /**
+     * @dev Allow contract to receive ETH
+     */
+    receive() external payable {}
 } 

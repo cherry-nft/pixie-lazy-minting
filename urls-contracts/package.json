@@ -1,0 +1,39 @@
+{
+  "name": "@urls/contracts",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./typechain-types/index.ts",
+  "types": "./typechain-types/index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "forge:test": "forge test",
+    "forge:build": "forge build",
+    "forge:coverage": "forge coverage",
+    "forge:deploy": "forge script",
+    "forge:snapshot": "forge snapshot"
+  },
+  "files": [
+    "typechain-types/**/*",
+    "artifacts/**/*.json"
+  ],
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ignition-viem": "^0.15.7",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
+    "@nomicfoundation/hardhat-viem": "^2.0.5",
+    "@openzeppelin/hardhat-upgrades": "^3.5.0",
+    "hardhat": "^2.22.15",
+    "viem": "^2.21.44"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.1.0",
+    "@openzeppelin/contracts-upgradeable": "^5.1.0",
+    "@uniswap/v3-core": "^1.0.1",
+    "@uniswap/v3-periphery": "^1.4.4",
+    "dotenv": "^16.4.5",
+    "solady": "^0.0.267"
+  }
+}

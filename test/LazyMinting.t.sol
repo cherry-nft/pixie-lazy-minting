@@ -8,6 +8,7 @@ import "../src/mocks/MockPoolManager.sol";
 import "../src/mocks/MockSwapRouter.sol";
 import "../src/interfaces/IUniswapInterfaces.sol";
 import "../src/PixieToken.sol";
+import "../src/BondingCurve.sol";
 
 contract LazyMintingTest is Test {
     // Contracts
@@ -15,6 +16,7 @@ contract LazyMintingTest is Test {
     MockPoolManager public poolManager;
     PixieHook public hook;
     MockSwapRouter public router;
+    BondingCurve public bondingCurve;
     
     // Test accounts
     address public creator = address(0x1);
@@ -32,8 +34,9 @@ contract LazyMintingTest is Test {
     
     function setUp() public {
         // Deploy contracts
+        bondingCurve = new BondingCurve();
         poolManager = new MockPoolManager();
-        factory = new LazyTokenFactory();
+        factory = new LazyTokenFactory(address(bondingCurve));
         hook = new PixieHook(address(factory), address(poolManager));
         router = new MockSwapRouter(address(poolManager));
         
@@ -93,7 +96,8 @@ contract LazyMintingTest is Test {
         assertTrue(size > 0);
         
         // Verify token details
-        PixieToken token = PixieToken(tokenAddress);
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
         assertEq(token.name(), tokenName);
         assertEq(token.symbol(), tokenSymbol);
         assertEq(token.creator(), creator);
@@ -146,7 +150,8 @@ contract LazyMintingTest is Test {
         assertTrue(factory.isTokenDeployed(contentId), "Token should be deployed");
         
         // Verify token details
-        PixieToken token = PixieToken(tokenAddress);
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
         assertEq(token.name(), tokenName, "Token name should match");
         assertEq(token.symbol(), tokenSymbol, "Token symbol should match");
         
@@ -164,5 +169,25 @@ contract LazyMintingTest is Test {
         assertTrue(buyerBalance > 0, "Buyer should have tokens");
         assertTrue(creatorBalance > 0, "Creator should have tokens");
         // Hook balance check is removed since hook no longer receives tokens in the royalty model
+    }
+
+    function testLazyTokenCreation() public {
+        // ... existing code ...
+        address tokenAddress = factory.getTokenAddress(contentId);
+        
+        // ... existing code ...
+        // Validate lazy token properties
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
+        // ... existing code ...
+    }
+    
+    function testMultipleMints() public {
+        // ... existing code ...
+        address tokenAddress = factory.getTokenAddress(contentId);
+        // ... existing code ...
+        address payable tokenPayable = payable(tokenAddress);
+        PixieToken token = PixieToken(tokenPayable);
+        // ... existing code ...
     }
 } 

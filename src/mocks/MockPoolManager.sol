@@ -1,58 +1,68 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import "../interfaces/IUniswapInterfaces.sol";
+import "forge-std/console.sol";
 
 /**
  * @title MockPoolManager
  * @dev A simplified mock of Uniswap v4's PoolManager for testing
  */
 contract MockPoolManager is IPoolManager {
-    // Track registered pools
-    mapping(PoolId => bool) public pools;
+    // Mapping from poolId to pool state
+    mapping(bytes32 => PoolState) public pools;
     
-    // Simplified pool state
+    // Pool state for tracking pools
     struct PoolState {
-        uint160 sqrtPriceX96;
-        int24 tick;
         bool initialized;
+        address hook;
+        int24 tick;
+        uint160 sqrtPriceX96;
     }
-    
-    mapping(PoolId => PoolState) public poolState;
     
     // Event for tracking calls
     event SwapCalled(address sender, PoolKey key, SwapParams params);
     event ModifyLiquidityCalled(address sender, PoolKey key, ModifyLiquidityParams params);
     
     /**
-     * @dev Convert pool key to pool ID
+     * @dev Allow the contract to receive ETH
+     */
+    receive() external payable {}
+    
+    /**
+     * @dev Calculate the pool ID from the pool key
      * @param key Pool key
      * @return Pool ID
      */
-    function toId(PoolKey memory key) public pure returns (PoolId) {
-        return PoolId.wrap(keccak256(abi.encode(key)));
+    function _poolIdFromKey(PoolKey memory key) internal pure returns (bytes32) {
+        return keccak256(abi.encode(key));
     }
     
     /**
      * @dev Initialize a pool
      * @param key Pool key
      * @param sqrtPriceX96 Initial price
-     * @return Current tick
+     * @return tick The current tick after initialization
      */
-    function initialize(PoolKey calldata key, uint160 sqrtPriceX96) external returns (int24) {
-        PoolId id = toId(key);
-        require(!poolState[id].initialized, "Pool already initialized");
+    function initialize(PoolKey calldata key, uint160 sqrtPriceX96) external returns (int24 tick) {
+        bytes32 poolId = _poolIdFromKey(key);
         
-        // For mock purposes, just set a fixed tick
-        int24 tick = 0;
+        // Ensure this pool hasn't been initialized already
+        require(!pools[poolId].initialized, "MockPoolManager: Already initialized");
         
-        poolState[id] = PoolState({
-            sqrtPriceX96: sqrtPriceX96,
+        // For mock purposes, we just set a fixed tick
+        tick = 0;
+        
+        // Store the hook address and initialized state
+        pools[poolId] = PoolState({
+            initialized: true,
+            hook: key.hooks,
             tick: tick,
-            initialized: true
+            sqrtPriceX96: sqrtPriceX96
         });
         
-        pools[id] = true;
+        console.log("MockPoolManager: Initialized pool");
+        console.log("  Hook address:", key.hooks);
         
         return tick;
     }
@@ -68,54 +78,74 @@ contract MockPoolManager is IPoolManager {
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata hookData
-    ) external override payable returns (BalanceDelta memory delta) {
-        PoolId id = toId(key);
-        require(pools[id], "Pool not initialized");
+    ) external payable returns (BalanceDelta memory) {
+        return swap(key, params, hookData, msg.sender);
+    }
+    
+    /**
+     * @dev Execute a swap operation with a specific sender
+     * @param key Pool key
+     * @param params Swap parameters
+     * @param hookData Additional data for hooks
+     * @param sender The sender of the swap
+     * @return delta Balance delta
+     */
+    function swap(
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata hookData,
+        address sender
+    ) public payable returns (BalanceDelta memory) {
+        bytes32 poolId = _poolIdFromKey(key);
+        
+        // Ensure the pool is initialized
+        require(pools[poolId].initialized, "MockPoolManager: Not initialized");
+        
+        PoolState storage pool = pools[poolId];
+        
+        // Mock balance delta - in a real system this would be calculated
+        BalanceDelta memory delta;
         
         // Call hooks if they exist
-        if (address(key.hooks) != address(0)) {
-            // Forward the ETH value to the hooks
-            uint256 ethValue = msg.value;
+        if (pool.hook != address(0)) {
+            bytes1 opType = bytes1(hookData[0]);
             
-            // Call beforeSwap hook
-            (bytes4 selector, BeforeSwapDelta memory beforeDelta) = IHooks(key.hooks).beforeSwap{value: ethValue}(
-                msg.sender,
-                key,
-                params,
-                hookData
-            );
+            console.log("MockPoolManager: Executing swap");
+            console.log("  Operation type:", uint8(opType));
+            console.log("  Amount specified:", uint256(params.amountSpecified));
+            console.log("  Zero for one:", params.zeroForOne);
+            console.log("  Value:", msg.value);
             
-            // Verify selector
-            require(selector == IHooks.beforeSwap.selector, "Invalid beforeSwap selector");
+            if (params.zeroForOne) {
+                // Buying tokens - extract ETH value
+                uint256 amount = uint256(params.amountSpecified);
+                
+                // Call the beforeSwap hook
+                IHooks(pool.hook).beforeSwap{value: msg.value}(msg.sender, key, params, hookData);
+                
+                // Since this is a mock, we don't need to calculate real deltas
+                delta = BalanceDelta(int256(msg.value), -int256(amount));
+            } else {
+                // Selling tokens - hookData should contain the sell details
+                uint256 tokenAmount = uint256(params.amountSpecified);
+                
+                // Call the beforeSwap hook (no ETH for sell)
+                IHooks(pool.hook).beforeSwap(msg.sender, key, params, hookData);
+                
+                // The hook will handle the actual ETH transfer to the seller
+                // For mock purposes, we'll just set a mock delta
+                // The ETH amount would depend on the bonding curve calculation
+                delta = BalanceDelta(-int256(tokenAmount), int256(tokenAmount));
+            }
             
-            // Apply changes from hook (in a real implementation)
-            
-            // Mock swap result
-            delta = BalanceDelta(
-                params.zeroForOne ? int256(-params.amountSpecified) : int256(0),
-                params.zeroForOne ? int256(0) : int256(-params.amountSpecified)
-            );
-            
-            // Call afterSwap hook
-            (selector,) = IHooks(key.hooks).afterSwap(
-                msg.sender,
-                key,
-                params,
-                delta,
-                hookData
-            );
-            
-            // Verify selector
-            require(selector == IHooks.afterSwap.selector, "Invalid afterSwap selector");
+            // Call the afterSwap hook
+            IHooks(pool.hook).afterSwap(msg.sender, key, params, delta, hookData);
         } else {
-            // Mock swap result without hooks
-            delta = BalanceDelta(
-                params.zeroForOne ? int256(-params.amountSpecified) : int256(0),
-                params.zeroForOne ? int256(0) : int256(-params.amountSpecified)
-            );
+            // For a pool without hooks, we just return a mock delta
+            delta = BalanceDelta(int256(params.amountSpecified), -int256(params.amountSpecified));
         }
         
-        emit SwapCalled(msg.sender, key, params);
+        emit SwapCalled(sender, key, params);
         return delta;
     }
     
@@ -124,20 +154,24 @@ contract MockPoolManager is IPoolManager {
      * @param key Pool key
      * @param params Liquidity parameters
      * @param hookData Additional data for hooks
-     * @return delta Balance delta
+     * @return delta Balance delta after modification
      */
     function modifyLiquidity(
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
         bytes calldata hookData
-    ) external override returns (BalanceDelta memory delta) {
-        PoolId id = toId(key);
-        require(pools[id], "Pool not initialized");
+    ) external returns (BalanceDelta memory delta) {
+        bytes32 poolId = _poolIdFromKey(key);
         
-        // Mock modification result
+        // Ensure the pool is initialized
+        require(pools[poolId].initialized, "MockPoolManager: Not initialized");
+        
+        PoolState storage pool = pools[poolId];
+        
+        // Mock balance delta
         delta = BalanceDelta(0, 0);
         
-        emit ModifyLiquidityCalled(msg.sender, key, params);
+        // Return the delta
         return delta;
     }
     
@@ -146,13 +180,9 @@ contract MockPoolManager is IPoolManager {
      * @param data Operations data
      * @return Result of callbacks
      */
-    function unlock(bytes calldata data) external override returns (bytes memory) {
-        // Call the unlock callback
-        return IUnlockCallback(msg.sender).unlockCallback(data);
+    function unlock(bytes calldata data) external returns (bytes memory) {
+        // Pass the data to the callback
+        IUnlockCallback callback = IUnlockCallback(msg.sender);
+        return callback.unlockCallback(data);
     }
-    
-    /**
-     * @dev Allow the contract to receive ETH
-     */
-    receive() external payable {}
 } 

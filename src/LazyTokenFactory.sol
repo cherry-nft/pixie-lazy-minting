@@ -2,11 +2,12 @@
 pragma solidity ^0.8.20;
 
 import "./PixieToken.sol";
+import "./BondingCurve.sol";
 import "./interfaces/IUniswapInterfaces.sol";
 
 /**
  * @title LazyTokenFactory
- * @dev Factory for lazy deployment of Pixie tokens
+ * @dev Factory for lazy deployment of Pixie tokens with bonding curve
  */
 contract LazyTokenFactory {
     // Token metadata storage
@@ -18,6 +19,9 @@ contract LazyTokenFactory {
         bool deployed;
     }
     
+    // The bonding curve implementation
+    BondingCurve public immutable bondingCurve;
+    
     // Map content IDs to metadata
     mapping(bytes32 => TokenMetadata) public tokenMetadata;
     // Map Currency to content ID
@@ -27,6 +31,16 @@ contract LazyTokenFactory {
     event TokenRegistered(bytes32 indexed contentId, string name, string symbol, address creator);
     event TokenDeployed(bytes32 indexed contentId, address tokenAddress);
     event TokenPurchased(bytes32 indexed contentId, address buyer, uint256 ethAmount, uint256 tokenAmount);
+    event TokenSold(bytes32 indexed contentId, address seller, uint256 ethAmount, uint256 tokenAmount);
+    
+    /**
+     * @dev Constructor
+     * @param _bondingCurve The bonding curve contract address
+     */
+    constructor(address _bondingCurve) {
+        require(_bondingCurve != address(0), "Zero address");
+        bondingCurve = BondingCurve(_bondingCurve);
+    }
     
     /**
      * @dev Register a new token without deploying
@@ -44,6 +58,7 @@ contract LazyTokenFactory {
         string memory contentURI
     ) external {
         require(tokenMetadata[contentId].creator == address(0), "Already registered");
+        require(creator != address(0), "Zero address");
         
         tokenMetadata[contentId] = TokenMetadata({
             name: name,
@@ -103,6 +118,9 @@ contract LazyTokenFactory {
             metadata.contentURI
         );
         
+        // Initialize with bonding curve
+        token.initialize(address(bondingCurve));
+        
         // Mark as deployed
         metadata.deployed = true;
         
@@ -129,7 +147,7 @@ contract LazyTokenFactory {
     }
     
     /**
-     * @dev Deploy a token and perform initial minting in one transaction based on ETH value
+     * @dev Deploy a token and perform initial purchase in one transaction
      * @param contentId Content identifier
      * @param buyer Address of buyer
      * @return The token address
@@ -137,46 +155,104 @@ contract LazyTokenFactory {
     function deployAndMint(
         bytes32 contentId,
         address buyer
-    ) public payable returns (address) {
+    ) public payable returns (address payable) {
         require(msg.value > 0, "Must send ETH");
         
         // Get or deploy the token
-        address tokenAddress;
+        address payable tokenAddress;
         bool isNewDeployment = !isTokenDeployed(contentId);
-        
-        // Convert ETH value to token amount (1:1 for simplicity)
-        // In production, you'd use a proper price mechanism
-        uint256 tokenAmount = msg.value;
         
         if (isNewDeployment) {
             // First time purchase - deploy the token
-            tokenAddress = deployToken(contentId);
-            
-            // Calculate buyer amount (95%) and creator amount (5%)
-            uint256 buyerAmount = tokenAmount * 95 / 100;
-            uint256 creatorAmount = tokenAmount - buyerAmount;
-            
-            // Initialize the token with first distribution
-            PixieToken(tokenAddress).initialMint(
-                buyer,
-                buyerAmount,
-                creatorAmount
-            );
+            tokenAddress = payable(deployToken(contentId));
         } else {
-            // Token already deployed, just mint with royalty
-            tokenAddress = getTokenAddress(contentId);
-            
-            // Mint with royalty split handled inside the token
-            PixieToken(tokenAddress).mintWithRoyalty(buyer, tokenAmount);
+            // Get existing token address
+            tokenAddress = payable(getTokenAddress(contentId));
         }
+        
+        // Buy tokens using the bonding curve
+        PixieToken token = PixieToken(tokenAddress);
+        uint256 tokenAmount = token.buy{value: msg.value}(buyer);
         
         emit TokenPurchased(contentId, buyer, msg.value, tokenAmount);
         
-        // Send the ETH to the creator (in a production system, you'd manage this more carefully)
-        TokenMetadata storage metadata = tokenMetadata[contentId];
-        (bool success, ) = metadata.creator.call{value: msg.value}("");
-        require(success, "ETH transfer failed");
-        
         return tokenAddress;
+    }
+    
+    /**
+     * @dev Sell tokens back to the bonding curve
+     * @param contentId Content identifier of the token
+     * @param amount Amount of tokens to sell
+     * @return ethAmount Amount of ETH received
+     */
+    function sellTokens(bytes32 contentId, uint256 amount) external returns (uint256) {
+        require(amount > 0, "Amount too small");
+        
+        // Get token address
+        address payable tokenAddress = payable(getTokenAddress(contentId));
+        require(isTokenDeployed(contentId), "Token not deployed");
+        
+        // Get the token contract
+        PixieToken token = PixieToken(tokenAddress);
+        
+        // Ensure the sender has approved the factory to spend tokens
+        require(token.allowance(msg.sender, address(this)) >= amount, "Not approved");
+        
+        // Transfer tokens from seller to token contract
+        require(token.transferFrom(msg.sender, tokenAddress, amount), "Transfer failed");
+        
+        // Sell tokens and get ETH
+        uint256 ethAmount = token.sell(msg.sender, amount);
+        
+        emit TokenSold(contentId, msg.sender, ethAmount, amount);
+        
+        return ethAmount;
+    }
+    
+    /**
+     * @dev Get a quote for buying tokens
+     * @param contentId Content identifier
+     * @param ethAmount Amount of ETH to spend
+     * @return tokenAmount Estimated token amount
+     */
+    function getBuyQuote(bytes32 contentId, uint256 ethAmount) external view returns (uint256) {
+        if (!isTokenDeployed(contentId)) {
+            // If token is not deployed yet, use initial price calculation
+            return ethAmount * 1000; // Simplified example
+        }
+        
+        // Get token and query its bonding curve
+        PixieToken token = PixieToken(payable(getTokenAddress(contentId)));
+        return token.getBuyQuote(ethAmount);
+    }
+    
+    /**
+     * @dev Get a quote for selling tokens
+     * @param contentId Content identifier
+     * @param tokenAmount Amount of tokens to sell
+     * @return ethAmount Estimated ETH amount
+     */
+    function getSellQuote(bytes32 contentId, uint256 tokenAmount) external view returns (uint256) {
+        require(isTokenDeployed(contentId), "Token not deployed");
+        
+        // Get token and query its bonding curve
+        PixieToken token = PixieToken(payable(getTokenAddress(contentId)));
+        return token.getSellQuote(tokenAmount);
+    }
+    
+    /**
+     * @dev Get current token price
+     * @param contentId Content identifier
+     * @return price Current token price in ETH (18 decimals)
+     */
+    function getCurrentPrice(bytes32 contentId) external view returns (uint256) {
+        if (!isTokenDeployed(contentId)) {
+            // If token is not deployed yet, return initial price
+            return bondingCurve.getCurrentPrice(0);
+        }
+        
+        // Get token and query its current price
+        PixieToken token = PixieToken(payable(getTokenAddress(contentId)));
+        return token.getCurrentPrice();
     }
 } 
