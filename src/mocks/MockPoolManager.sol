@@ -68,14 +68,17 @@ contract MockPoolManager is IPoolManager {
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata hookData
-    ) external override returns (BalanceDelta memory delta) {
+    ) external override payable returns (BalanceDelta memory delta) {
         PoolId id = toId(key);
         require(pools[id], "Pool not initialized");
         
         // Call hooks if they exist
         if (address(key.hooks) != address(0)) {
+            // Forward the ETH value to the hooks
+            uint256 ethValue = msg.value;
+            
             // Call beforeSwap hook
-            (bytes4 selector, BeforeSwapDelta memory beforeDelta) = IHooks(key.hooks).beforeSwap(
+            (bytes4 selector, BeforeSwapDelta memory beforeDelta) = IHooks(key.hooks).beforeSwap{value: ethValue}(
                 msg.sender,
                 key,
                 params,
@@ -147,4 +150,9 @@ contract MockPoolManager is IPoolManager {
         // Call the unlock callback
         return IUnlockCallback(msg.sender).unlockCallback(data);
     }
+    
+    /**
+     * @dev Allow the contract to receive ETH
+     */
+    receive() external payable {}
 } 

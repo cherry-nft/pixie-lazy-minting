@@ -137,7 +137,8 @@ contract LazyMintingTest is Test {
         vm.prank(buyer);
         // Pass the buyer address as hook data for proper recipient tracking
         bytes memory hookData = abi.encode(buyer);
-        router.swap(poolKey, params, hookData);
+        // Add ETH value to the swap call to support the royalty model
+        router.swap{value: 1 ether}(poolKey, params, hookData);
         
         console.log("After swap - Token deployed:", factory.isTokenDeployed(contentId));
         
@@ -159,10 +160,9 @@ contract LazyMintingTest is Test {
         console.log("Buyer balance:", buyerBalance);
         console.log("Creator balance:", creatorBalance);
         console.log("Hook balance:", hookBalance);
-        console.log("Total supply:", token.TOTAL_SUPPLY());
         
         assertTrue(buyerBalance > 0, "Buyer should have tokens");
         assertTrue(creatorBalance > 0, "Creator should have tokens");
-        assertTrue(hookBalance > 0, "Hook should have tokens for liquidity");
+        // Hook balance check is removed since hook no longer receives tokens in the royalty model
     }
 } 

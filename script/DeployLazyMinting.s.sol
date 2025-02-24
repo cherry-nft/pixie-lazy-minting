@@ -66,7 +66,7 @@ contract ExecuteTestSwap is Script {
     function run() public {
         // Retrieve the private key and addresses from environment
         uint256 buyerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address routerAddress = vm.envAddress("ROUTER_ADDRESS");
+        address payable routerAddress = payable(vm.envAddress("ROUTER_ADDRESS"));
         address hookAddress = vm.envAddress("HOOK_ADDRESS");
         address factoryAddress = vm.envAddress("FACTORY_ADDRESS");
         bytes32 contentId = vm.envBytes32("CONTENT_ID");
@@ -97,8 +97,9 @@ contract ExecuteTestSwap is Script {
             sqrtPriceLimitX96: 0 // No price limit
         });
         
-        // Execute swap to trigger lazy deployment
-        router.swap(poolKey, params, "");
+        // Execute swap to trigger lazy deployment with ETH value
+        uint256 ethAmount = 0.1 ether;
+        router.swap{value: ethAmount}(poolKey, params, "");
         
         // Check if token is deployed
         bool isDeployed = factory.isTokenDeployed(contentId);

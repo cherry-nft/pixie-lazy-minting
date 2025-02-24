@@ -31,13 +31,14 @@ contract MockSwapRouter is IUnlockCallback {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         bytes calldata hookData
-    ) external returns (BalanceDelta memory delta) {
+    ) external payable returns (BalanceDelta memory delta) {
         // Store the original sender
         lastActualSender = msg.sender;
         console.log("SwapRouter swap - Original sender:", msg.sender);
+        console.log("SwapRouter swap - ETH value:", msg.value);
         
         // Encode the parameters for the callback
-        bytes memory data = abi.encode(key, params, hookData, msg.sender);
+        bytes memory data = abi.encode(key, params, hookData, msg.sender, msg.value);
         
         // Call unlock on the pool manager
         poolManager.unlock(data);
@@ -60,15 +61,22 @@ contract MockSwapRouter is IUnlockCallback {
             PoolKey memory key,
             IPoolManager.SwapParams memory params,
             bytes memory hookData,
-            address sender
-        ) = abi.decode(data, (PoolKey, IPoolManager.SwapParams, bytes, address));
+            address sender,
+            uint256 ethValue
+        ) = abi.decode(data, (PoolKey, IPoolManager.SwapParams, bytes, address, uint256));
         
         console.log("SwapRouter unlockCallback - Decoded sender:", sender);
+        console.log("SwapRouter unlockCallback - ETH value:", ethValue);
         
-        // Execute the swap as the original sender
-        BalanceDelta memory delta = IPoolManager(msg.sender).swap(key, params, hookData);
+        // Execute the swap as the original sender, passing along the ETH value
+        BalanceDelta memory delta = IPoolManager(msg.sender).swap{value: ethValue}(key, params, hookData);
         
         // Return the result
         return abi.encode(delta);
     }
+    
+    /**
+     * @dev Allow the contract to receive ETH
+     */
+    receive() external payable {}
 } 

@@ -26,6 +26,7 @@ contract LazyTokenFactory {
     // Events
     event TokenRegistered(bytes32 indexed contentId, string name, string symbol, address creator);
     event TokenDeployed(bytes32 indexed contentId, address tokenAddress);
+    event TokenPurchased(bytes32 indexed contentId, address buyer, uint256 ethAmount, uint256 tokenAmount);
     
     /**
      * @dev Register a new token without deploying
@@ -128,26 +129,53 @@ contract LazyTokenFactory {
     }
     
     /**
-     * @dev Deploy a token and perform initial minting in one transaction
+     * @dev Deploy a token and perform initial minting in one transaction based on ETH value
      * @param contentId Content identifier
-     * @param buyer Address of first buyer
-     * @param buyAmount Amount of tokens for buyer
-     * @param poolAddress Address of the liquidity pool
-     * @param poolAmount Amount of tokens for liquidity pool
+     * @param buyer Address of buyer
      * @return The token address
      */
     function deployAndMint(
         bytes32 contentId,
-        address buyer,
-        uint256 buyAmount,
-        address poolAddress,
-        uint256 poolAmount
-    ) public returns (address) {
-        // First, deploy the token if not already deployed
-        address tokenAddress = deployToken(contentId);
+        address buyer
+    ) public payable returns (address) {
+        require(msg.value > 0, "Must send ETH");
         
-        // Then perform initial minting (factory is authorized to call this)
-        PixieToken(tokenAddress).initialMint(buyer, buyAmount, poolAddress, poolAmount);
+        // Get or deploy the token
+        address tokenAddress;
+        bool isNewDeployment = !isTokenDeployed(contentId);
+        
+        // Convert ETH value to token amount (1:1 for simplicity)
+        // In production, you'd use a proper price mechanism
+        uint256 tokenAmount = msg.value;
+        
+        if (isNewDeployment) {
+            // First time purchase - deploy the token
+            tokenAddress = deployToken(contentId);
+            
+            // Calculate buyer amount (95%) and creator amount (5%)
+            uint256 buyerAmount = tokenAmount * 95 / 100;
+            uint256 creatorAmount = tokenAmount - buyerAmount;
+            
+            // Initialize the token with first distribution
+            PixieToken(tokenAddress).initialMint(
+                buyer,
+                buyerAmount,
+                creatorAmount
+            );
+        } else {
+            // Token already deployed, just mint with royalty
+            tokenAddress = getTokenAddress(contentId);
+            
+            // Mint with royalty split handled inside the token
+            PixieToken(tokenAddress).mintWithRoyalty(buyer, tokenAmount);
+        }
+        
+        emit TokenPurchased(contentId, buyer, msg.value, tokenAmount);
+        
+        // Send the ETH to the creator (in a production system, you'd manage this more carefully)
+        TokenMetadata storage metadata = tokenMetadata[contentId];
+        (bool success, ) = metadata.creator.call{value: msg.value}("");
+        require(success, "ETH transfer failed");
         
         return tokenAddress;
     }

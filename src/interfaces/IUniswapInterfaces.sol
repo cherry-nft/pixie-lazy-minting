@@ -56,7 +56,7 @@ interface IPoolManager {
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata hookData
-    ) external returns (BalanceDelta memory delta);
+    ) external payable returns (BalanceDelta memory delta);
     
     function unlock(bytes calldata data) external returns (bytes memory);
 }
@@ -68,7 +68,7 @@ interface IHooks {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         bytes calldata hookData
-    ) external returns (bytes4, BeforeSwapDelta memory);
+    ) external payable returns (bytes4, BeforeSwapDelta memory);
     
     function afterSwap(
         address sender,
