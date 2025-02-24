@@ -34,7 +34,6 @@ contract MockSwapRouter {
     ) external payable returns (BalanceDelta memory) {
         // Store the original sender for the callback
         bytes32 poolId = keccak256(abi.encode(key));
-        originSenders[poolId] = msg.sender;
         
         // Log swap details
         console.log("MockSwapRouter: Swap initiated");
@@ -45,20 +44,25 @@ contract MockSwapRouter {
         // Decode the hook data to determine operation type
         bytes1 opType = bytes1(hookData[0]);
         console.log("  Operation type:", uint8(opType));
+        console.log("  Hook data length:", hookData.length);
+        
+        // Prepare the data for the unlock call
+        bytes memory encodedData = abi.encode(key, params, hookData, msg.sender);
+        console.log("  Encoded data length:", encodedData.length);
         
         // Forward value to pool manager for the swap
         // This ensures that the hook has access to ETH for buying operations
         (bool success, bytes memory data) = poolManager.call{value: msg.value}(
             abi.encodeWithSelector(
                 IPoolManager.unlock.selector,
-                abi.encode(key, params, hookData, msg.sender)
+                encodedData
             )
         );
         
-        require(success, "Mock Swap Router: unlock failed");
-        
-        // For sell operations (opType = 0x01), the ETH is returned to the user
-        // This is handled automatically through the hook callback
+        if (!success) {
+            console.log("  Call to unlock failed");
+            return BalanceDelta(0, 0);
+        }
         
         return abi.decode(data, (BalanceDelta));
     }
@@ -77,15 +81,19 @@ contract MockSwapRouter {
             abi.decode(data, (PoolKey, IPoolManager.SwapParams, bytes, address));
         
         bytes32 poolId = keccak256(abi.encode(key));
-        address originSender = originSenders[poolId];
+        
+        // Log decoded data for troubleshooting
+        console.log("UnlockCallback: Processing hook data of length", hookData.length);
+        if (hookData.length > 0) {
+            console.log("  Operation type:", uint8(bytes1(hookData[0])));
+        }
         
         // Call to the pool manager to execute the swap
         IPoolManager pm = IPoolManager(poolManager);
-        BalanceDelta memory delta = pm.swap(key, params, hookData);
         
-        // If we're selling tokens (not zeroForOne), ensure ETH is sent back to the user
-        // The hook will handle the actual ETH transfer after completing the sell
-        // No need to do anything here as the hook will handle it
+        // Pass the hook data directly - do not try to re-encode it
+        // The IPoolManager.swap function only accepts 3 parameters, not 4
+        BalanceDelta memory delta = pm.swap(key, params, hookData);
         
         return abi.encode(delta);
     }

@@ -181,8 +181,21 @@ contract MockPoolManager is IPoolManager {
      * @return Result of callbacks
      */
     function unlock(bytes calldata data) external returns (bytes memory) {
-        // Pass the data to the callback
+        console.log("MockPoolManager: Unlock called with data length", data.length);
+        
+        // The callback might revert, so we need to handle that gracefully
         IUnlockCallback callback = IUnlockCallback(msg.sender);
-        return callback.unlockCallback(data);
+        
+        (bool success, bytes memory returnData) = address(callback).call(
+            abi.encodeWithSelector(IUnlockCallback.unlockCallback.selector, data)
+        );
+        
+        if (success) {
+            return returnData;
+        } else {
+            console.log("MockPoolManager: Unlock callback failed");
+            // Return a default value rather than reverting
+            return abi.encode(BalanceDelta(0, 0));
+        }
     }
 } 

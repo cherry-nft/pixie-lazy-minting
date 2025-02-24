@@ -227,7 +227,7 @@ contract BondingCurveMintingTest is Test {
         });
         
         // Create hook data for buy operation (0 = Buy)
-        bytes memory buyHookData = abi.encodePacked(bytes1(0x00), buyer1);
+        bytes memory buyHookData = bytes.concat(bytes1(0x00), abi.encode(buyer1));
         
         // Execute swap as buyer
         vm.prank(buyer1);
@@ -253,7 +253,7 @@ contract BondingCurveMintingTest is Test {
         });
         
         // Create hook data for sell operation (1 = Sell)
-        bytes memory sellHookData = abi.encodePacked(bytes1(0x01), buyer1);
+        bytes memory sellHookData = bytes.concat(bytes1(0x01), abi.encode(buyer1));
         
         // Execute swap as seller
         vm.prank(buyer1);

@@ -139,8 +139,8 @@ contract LazyMintingTest is Test {
         
         // Execute swap as buyer (which should trigger lazy deployment)
         vm.prank(buyer);
-        // Pass the buyer address as hook data for proper recipient tracking
-        bytes memory hookData = abi.encode(buyer);
+        // Format: bytes1(0x00) for buy operation + abi.encode(buyer address)
+        bytes memory hookData = bytes.concat(bytes1(0x00), abi.encode(buyer));
         // Add ETH value to the swap call to support the royalty model
         router.swap{value: 1 ether}(poolKey, params, hookData);
         

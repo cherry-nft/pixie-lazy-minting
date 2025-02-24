@@ -50,85 +50,60 @@ contract PixieHook is IHooks, IPixieHook {
      * @notice Handle before swap
      * @param key Pool key
      * @param params Swap parameters
-     * @param data Hook data
+     * @param hookData Hook data
      */
     function beforeSwap(
         address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
-        bytes calldata data
+        bytes calldata hookData
     ) external payable override returns (bytes4, BeforeSwapDelta memory) {
         require(msg.sender == poolManager, "PixieHook: Only pool manager");
         
-        // Get operation type and recipient from data
-        bytes1 opType = bytes1(data[0]);
-        address recipient = address(bytes20(data[1:21]));
+        console.log("PixieHook: beforeSwap entry point");
+        console.log("  Sender:", sender);
+        console.log("  Msg.value:", msg.value);
+        console.log("  HookData length:", hookData.length);
         
-        console.log("PixieHook: Before swap");
+        // First byte of hookData indicates operation type (buy/sell)
+        bytes1 opType = bytes1(hookData[0]);
+        
+        // Extract buyer/seller address from hookData (skip the first byte which is the operation type)
+        address payable recipient;
+        if (hookData.length > 1) {
+            // Extract recipient from the rest of the hookData (after the operation type)
+            bytes memory recipientData = new bytes(hookData.length - 1);
+            for (uint i = 0; i < hookData.length - 1; i++) {
+                recipientData[i] = hookData[i + 1];
+            }
+            // Decode the address from the extracted data
+            (address extractedAddress) = abi.decode(recipientData, (address));
+            recipient = payable(extractedAddress);
+        } else {
+            // Default to sender if no address is provided
+            recipient = payable(sender);
+        }
+        
+        console.log("PixieHook: beforeSwap parsed data");
         console.log("  Operation type:", uint8(opType));
         console.log("  Recipient:", recipient);
         console.log("  Value:", msg.value);
         
-        // Get token address from currency
-        address tokenAddress = Currency.unwrap(key.currency1);
-        
-        // Determine operation type (0x00 = buy, 0x01 = sell)
+        // Handle operation based on type
         if (opType == 0x00) {
-            // Buy operation - requires ETH
-            require(msg.value > 0, "PixieHook: Buy requires ETH");
-            require(params.zeroForOne, "PixieHook: Buy must be zeroForOne");
-            
-            // Find content ID for the token
-            bytes32 tokenContentId;
-            // Try to get contentId from the currency mapping
-            tokenContentId = factory.getContentId(key.currency1);
-            
-            // If not found, use the contentId from storage (for testing)
-            if (bytes32(0) == tokenContentId) {
-                tokenContentId = contentId;
-            }
-            
-            // Deploy token if needed and mint tokens to recipient
-            factory.deployAndMint{value: msg.value}(tokenContentId, recipient);
-            
+            console.log("PixieHook: Executing buy operation");
+            // Buy operation
+            handleBuyOperation(key, params, recipient);
         } else if (opType == 0x01) {
+            console.log("PixieHook: Executing sell operation");
             // Sell operation
-            require(!params.zeroForOne, "PixieHook: Sell must be oneForZero");
-            require(params.amountSpecified > 0, "PixieHook: Sell amount must be positive");
-            
-            // Find content ID for the token
-            bytes32 tokenContentId = factory.getContentId(key.currency0);
-            
-            // If not found, use the contentId from storage (for testing)
-            if (bytes32(0) == tokenContentId) {
-                tokenContentId = contentId;
-            }
-            
-            // Approve and sell tokens
-            // Note: Recipient must have approved the hook to spend their tokens
-            uint256 sellAmount = uint256(params.amountSpecified);
-            
-            // Get the recipient to approve the factory
-            bool success = IERC20(tokenAddress).transferFrom(
-                recipient,
-                address(this),
-                sellAmount
-            );
-            require(success, "PixieHook: Transfer from sender failed");
-            
-            // Approve factory to spend tokens
-            IERC20(tokenAddress).approve(address(factory), sellAmount);
-            
-            // Sell tokens and get ETH back
-            uint256 ethReceived = factory.sellTokens(tokenContentId, sellAmount);
-            
-            // Send ETH back to recipient
-            (success, ) = recipient.call{value: ethReceived}("");
-            require(success, "PixieHook: ETH transfer failed");
+            handleSellOperation(key, params, recipient);
         } else {
-            revert("PixieHook: Invalid operation type");
+            console.log("PixieHook: Unknown operation type");
+            revert("PixieHook: Unknown operation type");
         }
         
+        console.log("PixieHook: Operation completed successfully");
         return (IHooks.beforeSwap.selector, BeforeSwapDelta(0, 0, 0));
     }
     
@@ -137,19 +112,19 @@ contract PixieHook is IHooks, IPixieHook {
      * @param key Pool key
      * @param params Swap parameters
      * @param delta Balance delta
-     * @param data Hook data
+     * @param hookData Hook data
      */
     function afterSwap(
         address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         BalanceDelta calldata delta,
-        bytes calldata data
+        bytes calldata hookData
     ) external override returns (bytes4, BalanceDelta memory) {
         require(msg.sender == poolManager, "PixieHook: Only pool manager");
         
         // Get operation type from data
-        bytes1 opType = bytes1(data[0]);
+        bytes1 opType = bytes1(hookData[0]);
         
         // Log swap completion
         console.log("PixieHook: After swap");
@@ -164,6 +139,103 @@ contract PixieHook is IHooks, IPixieHook {
      */
     function setContentId(bytes32 _contentId) external override {
         contentId = _contentId;
+    }
+    
+    /**
+     * @dev Handle buy operation
+     * @param key Pool key
+     * @param params Swap parameters
+     * @param recipient Recipient address
+     */
+    function handleBuyOperation(
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        address payable recipient
+    ) internal {
+        // Buy operation - requires ETH
+        require(msg.value > 0, "PixieHook: Buy requires ETH");
+        require(params.zeroForOne, "PixieHook: Buy must be zeroForOne");
+        
+        console.log("PixieHook: Processing buy with ETH value:", msg.value);
+        
+        // Get token address from currency
+        address tokenAddress = Currency.unwrap(key.currency1);
+        console.log("PixieHook: Token address from currency:", tokenAddress);
+        
+        // Find content ID for the token
+        bytes32 tokenContentId;
+        // Try to get contentId from the currency mapping
+        tokenContentId = factory.getContentId(key.currency1);
+        
+        // If not found, use the contentId from storage (for testing)
+        if (bytes32(0) == tokenContentId) {
+            tokenContentId = contentId;
+        }
+        
+        console.log("PixieHook: Content ID:", uint256(tokenContentId));
+        
+        // Deploy token if needed and mint tokens to recipient
+        factory.deployAndMint{value: msg.value}(tokenContentId, recipient);
+        
+        console.log("PixieHook: Buy operation completed successfully");
+    }
+    
+    /**
+     * @dev Handle sell operation
+     * @param key Pool key
+     * @param params Swap parameters
+     * @param recipient Recipient address
+     */
+    function handleSellOperation(
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        address payable recipient
+    ) internal {
+        // Sell operation
+        require(!params.zeroForOne, "PixieHook: Sell must be oneForZero");
+        require(params.amountSpecified > 0, "PixieHook: Sell amount must be positive");
+        
+        console.log("PixieHook: Processing sell with amount:", uint256(params.amountSpecified));
+        
+        // Get token address from currency
+        address tokenAddress = Currency.unwrap(key.currency1);
+        console.log("PixieHook: Token address from currency:", tokenAddress);
+        
+        // Find content ID for the token
+        bytes32 tokenContentId = factory.getContentId(key.currency1);
+        
+        // If not found, use the contentId from storage (for testing)
+        if (bytes32(0) == tokenContentId) {
+            tokenContentId = contentId;
+        }
+        
+        console.log("PixieHook: Content ID:", uint256(tokenContentId));
+        
+        // Approve and sell tokens
+        // Note: Recipient must have approved the hook to spend their tokens
+        uint256 sellAmount = uint256(params.amountSpecified);
+        
+        // Get the recipient to approve the factory
+        bool success = IERC20(tokenAddress).transferFrom(
+            recipient,
+            address(this),
+            sellAmount
+        );
+        require(success, "PixieHook: Transfer from sender failed");
+        
+        // Approve factory to spend tokens
+        IERC20(tokenAddress).approve(address(factory), sellAmount);
+        
+        // Sell tokens and get ETH back
+        uint256 ethReceived = factory.sellTokens(tokenContentId, sellAmount);
+        
+        console.log("PixieHook: ETH received from sell:", ethReceived);
+        
+        // Send ETH back to recipient
+        (success, ) = recipient.call{value: ethReceived}("");
+        require(success, "PixieHook: ETH transfer failed");
+        
+        console.log("PixieHook: Sell operation completed successfully");
     }
     
     // Allow the contract to receive ETH

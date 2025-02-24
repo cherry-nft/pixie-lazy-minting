@@ -235,7 +235,8 @@ contract RoyaltyMintingTest is Test {
         
         // Execute swap as buyer with ETH value
         vm.prank(buyer1);
-        bytes memory hookData = abi.encode(buyer1); // Pass buyer address in hook data
+        // Format: bytes1(0x00) for buy operation + abi.encode(buyer address)
+        bytes memory hookData = bytes.concat(bytes1(0x00), abi.encode(buyer1));
         router.swap{value: purchaseAmount}(poolKey, params, hookData);
         
         // Verify token is deployed
